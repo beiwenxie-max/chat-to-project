@@ -29,7 +29,7 @@
 ### 方式一：克隆到 Antigravity 插件目录（推荐）
 
 ```bash
-git clone https://github.com/your-username/chat-to-project.git ~/.gemini/config/plugins/chat-to-project
+git clone https://github.com/beiwenxie-max/chat-to-project.git ~/.gemini/config/plugins/chat-to-project
 ```
 
 ### 方式二：本地软链接
