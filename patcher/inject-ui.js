@@ -46,27 +46,34 @@
       .c2p-header-btn {
         display: inline-flex;
         align-items: center;
-        gap: 6px;
-        padding: 5px 12px;
-        font-size: 12px;
+        gap: 5px;
+        height: 24px;
+        padding: 0 8px;
+        font-size: 11px;
         font-weight: 500;
-        color: #ffffff;
-        background: linear-gradient(135deg, #1a73e8 0%, #0d47a1 100%);
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        border-radius: 6px;
+        color: #cccccc;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 4px;
         cursor: pointer;
-        transition: all 0.2s ease;
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
         user-select: none;
-        z-index: 999;
+        flex-shrink: 0;
+        margin: 0 4px;
+        line-height: 24px;
+        transition: all 0.15s ease;
+        vertical-align: middle;
       }
       .c2p-header-btn:hover {
-        background: linear-gradient(135deg, #1b85ff 0%, #1565c0 100%);
-        box-shadow: 0 4px 10px rgba(26, 115, 232, 0.4);
-        transform: translateY(-1px);
+        color: #ffffff;
+        background: rgba(255, 255, 255, 0.12);
+        border-color: rgba(255, 255, 255, 0.25);
       }
       .c2p-header-btn:active {
-        transform: translateY(0);
+        transform: scale(0.97);
+      }
+      .c2p-header-btn svg {
+        color: #1a73e8;
+        flex-shrink: 0;
       }
       .c2p-modal-overlay {
         position: fixed;
@@ -281,19 +288,15 @@
     browseBtn.onclick = async () => {
       let chosenPath = null;
       try {
-        // 1. 优先调用 Antigravity 原生公开的 dialog.showOpenDialog()
         if (window.dialog && typeof window.dialog.showOpenDialog === 'function') {
           chosenPath = await window.dialog.showOpenDialog();
-        }
-        // 2. 备用方式：直接通过 ipcRenderer 触发 Antigravity 的 'dialog:open-workspace'
-        else if (electron && electron.ipcRenderer) {
+        } else if (electron && electron.ipcRenderer) {
           chosenPath = await electron.ipcRenderer.invoke('dialog:open-workspace');
         }
       } catch (err) {
         console.warn('[Chat-to-Project] Electron dialog API call failed, trying HTML5 file picker:', err);
       }
 
-      // 3. 第三重保底：使用浏览器标准 webkitdirectory
       if (!chosenPath) {
         const fileInput = document.createElement('input');
         fileInput.type = 'file';
@@ -305,7 +308,6 @@
           if (fileInput.files && fileInput.files.length > 0) {
             const first = fileInput.files[0];
             if (first.path) {
-              // 在 Electron 中，文件的 .path 属性为本地绝对路径
               const dirPath = first.path.substring(0, first.path.lastIndexOf('/'));
               if (dirPath) pathInput.value = dirPath;
             }
@@ -344,15 +346,12 @@
   function executeRealMigration(targetPath, options) {
     showToast(`正在本地创建与配置项目：${targetPath}...`);
 
-    let localSuccess = false;
     try {
       if (fs) {
-        // 1. 真实确保目标目录存在
         if (!fs.existsSync(targetPath)) {
           fs.mkdirSync(targetPath, { recursive: true });
         }
 
-        // 2. 真实创建 .agents/rules/
         if (options.optRules) {
           const rulesDir = path.join(targetPath, '.agents', 'rules');
           if (!fs.existsSync(rulesDir)) fs.mkdirSync(rulesDir, { recursive: true });
@@ -362,7 +361,6 @@
           }
         }
 
-        // 3. 真实生成 PROJECT_CONTEXT.md 基础骨架
         if (options.optContext) {
           const contextFile = path.join(targetPath, 'PROJECT_CONTEXT.md');
           if (!fs.existsSync(contextFile)) {
@@ -370,7 +368,6 @@
           }
         }
 
-        // 4. 真实执行 Git 初始化
         if (options.optGit && childProcess) {
           const gitDir = path.join(targetPath, '.git');
           if (!fs.existsSync(gitDir)) {
@@ -381,14 +378,11 @@
             }
           }
         }
-
-        localSuccess = true;
       }
     } catch (fsErr) {
       console.error('[Chat-to-Project] Local filesystem setup error:', fsErr);
     }
 
-    // 5. 将迁移指令穿透填入当前聊天输入框，让智能体完成会话上下文的全面提炼沉淀
     sendPromptToAgent(`请使用 chat-to-project 技能将当前聊天的完整上下文、架构决策与生成的代码沉淀到本地项目：${targetPath}`);
     showToast(`✅ 项目已在本地创建就绪，智能体正在同步会话上下文！`, 4000);
   }
@@ -412,7 +406,6 @@
       textarea.dispatchEvent(new InputEvent('input', { bubbles: true }));
     }
 
-    // 延时触发提交
     setTimeout(() => {
       const sendBtn = document.querySelector('button[aria-label*="Send"], button[aria-label*="发送"], button[type="submit"]');
       if (sendBtn) {
@@ -423,55 +416,75 @@
     }, 200);
   }
 
-  // 挂载按钮到顶部栏
+  // 创建按钮元素
+  function getOrCreateButton() {
+    let btn = document.getElementById('c2p-header-btn');
+    if (!btn) {
+      injectStyles();
+      btn = document.createElement('button');
+      btn.id = 'c2p-header-btn';
+      btn.className = 'c2p-header-btn';
+      btn.title = '将当前未绑定的会话移动或沉淀至具体项目工作区';
+      btn.innerHTML = `
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          <line x1="12" y1="11" x2="12" y2="17"></line>
+          <line x1="9" y1="14" x2="15" y2="14"></line>
+        </svg>
+        <span>移动至项目</span>
+      `;
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        openMoveModal();
+      };
+    }
+    return btn;
+  }
+
+  // 精准嵌入顶栏布局流中，绝不遮挡其他元素
   function tryMountButton() {
-    if (document.getElementById('c2p-header-btn')) return;
+    const btn = getOrCreateButton();
 
-    injectStyles();
+    // 锚点 1：寻找状态栏右侧组件（#ag-context-meter 或其他工具按钮）
+    const meter = document.getElementById('ag-context-meter');
+    if (meter && meter.parentElement) {
+      if (btn.parentElement !== meter.parentElement) {
+        // 插入在 meter 之前，自然参与 flex 布局，紧挨其左侧
+        meter.parentElement.insertBefore(btn, meter);
+      }
+      return;
+    }
 
-    const btn = document.createElement('button');
-    btn.id = 'c2p-header-btn';
-    btn.className = 'c2p-header-btn';
-    btn.title = '将当前未绑定的会话移动或沉淀至具体项目工作区';
-    btn.innerHTML = `
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-        <line x1="12" y1="11" x2="12" y2="17"></line>
-        <line x1="9" y1="14" x2="15" y2="14"></line>
-      </svg>
-      <span>移动至项目</span>
-    `;
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      openMoveModal();
-    };
-
-    const headerCandidates = [
-      document.querySelector('header'),
-      document.querySelector('[role="banner"]'),
-      document.querySelector('.chat-header'),
-      document.querySelector('[data-testid="chat-header"]')
-    ];
-
-    let mounted = false;
-    for (const container of headerCandidates) {
-      if (container) {
-        container.appendChild(btn);
-        mounted = true;
-        break;
+    // 锚点 2：寻找顶栏容器 [class*="@container/titlebar"] 的右侧动作区
+    const titlebar = document.querySelector('[class*="@container/titlebar"]');
+    if (titlebar) {
+      const rightGroup = titlebar.querySelector(':scope > div.shrink-0') ||
+                         titlebar.querySelector('div.flex.items-center:last-child') ||
+                         titlebar.lastElementChild;
+      if (rightGroup && rightGroup !== titlebar.firstElementChild) {
+        if (btn.parentElement !== rightGroup) {
+          rightGroup.insertBefore(btn, rightGroup.firstChild);
+        }
+        return;
       }
     }
 
-    if (!mounted) {
-      btn.style.position = 'fixed';
-      btn.style.top = '12px';
-      btn.style.right = '120px';
-      btn.style.zIndex = '9999';
-      document.body.appendChild(btn);
+    // 锚点 3：寻找包含辅助侧栏切换或 CLI 的父级工具栏容器
+    const auxToggle = document.querySelector('[data-testid="toggle-aux-sidebar"]') ||
+                      document.querySelector('div.absolute.right-0');
+    if (auxToggle) {
+      const container = (auxToggle.classList && auxToggle.classList.contains('flex'))
+        ? auxToggle
+        : (auxToggle.closest('div.flex') || auxToggle.parentElement);
+      if (container && btn.parentElement !== container) {
+        container.insertBefore(btn, container.firstChild);
+        return;
+      }
     }
+
+    // 注意：绝不使用 position: fixed 悬浮定位，避免遮挡原生控件
   }
 
-  // 初始化与 DOM 监听
   function init() {
     tryMountButton();
     const observer = new MutationObserver(() => {
