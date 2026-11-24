@@ -44,36 +44,43 @@
     style.id = 'c2p-injected-styles';
     style.textContent = `
       .c2p-header-btn {
-        display: inline-flex;
-        align-items: center;
-        gap: 5px;
-        height: 24px;
-        padding: 0 8px;
-        font-size: 11px;
-        font-weight: 500;
-        color: #cccccc;
-        background: rgba(255, 255, 255, 0.06);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 4px;
-        cursor: pointer;
-        user-select: none;
-        flex-shrink: 0;
-        margin: 0 4px;
-        line-height: 24px;
-        transition: all 0.15s ease;
-        vertical-align: middle;
+        -webkit-app-region: no-drag !important;
+        pointer-events: auto !important;
+        cursor: pointer !important;
+        position: relative !important;
+        z-index: 9999 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: 5px !important;
+        height: 24px !important;
+        padding: 0 8px !important;
+        font-size: 11px !important;
+        font-weight: 500 !important;
+        color: #cccccc !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+        border: 1px solid rgba(255, 255, 255, 0.15) !important;
+        border-radius: 4px !important;
+        user-select: none !important;
+        flex-shrink: 0 !important;
+        margin: 0 4px !important;
+        line-height: 24px !important;
+        transition: all 0.15s ease !important;
+        vertical-align: middle !important;
       }
       .c2p-header-btn:hover {
-        color: #ffffff;
-        background: rgba(255, 255, 255, 0.12);
-        border-color: rgba(255, 255, 255, 0.25);
+        color: #ffffff !important;
+        background: rgba(255, 255, 255, 0.15) !important;
+        border-color: rgba(255, 255, 255, 0.3) !important;
       }
       .c2p-header-btn:active {
-        transform: scale(0.97);
+        transform: scale(0.96) !important;
+      }
+      .c2p-header-btn * {
+        pointer-events: none !important;
       }
       .c2p-header-btn svg {
-        color: #1a73e8;
-        flex-shrink: 0;
+        color: #1a73e8 !important;
+        flex-shrink: 0 !important;
       }
       .c2p-modal-overlay {
         position: fixed;
@@ -416,7 +423,7 @@
     }, 200);
   }
 
-  // 创建按钮元素
+  // 创建按钮元素并绑定全阶段事件穿透
   function getOrCreateButton() {
     let btn = document.getElementById('c2p-header-btn');
     if (!btn) {
@@ -433,10 +440,21 @@
         </svg>
         <span>移动至项目</span>
       `;
-      btn.onclick = (e) => {
-        e.stopPropagation();
+
+      const triggerOpen = (e) => {
+        if (e) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
         openMoveModal();
       };
+
+      // 捕获阶段与冒泡阶段全监听，防止被 Electron 顶层捕获阻断
+      btn.addEventListener('click', triggerOpen, true);
+      btn.addEventListener('mousedown', (e) => {
+        e.stopPropagation();
+      }, true);
+      btn.onclick = triggerOpen;
     }
     return btn;
   }
@@ -449,7 +467,6 @@
     const meter = document.getElementById('ag-context-meter');
     if (meter && meter.parentElement) {
       if (btn.parentElement !== meter.parentElement) {
-        // 插入在 meter 之前，自然参与 flex 布局，紧挨其左侧
         meter.parentElement.insertBefore(btn, meter);
       }
       return;
@@ -481,8 +498,6 @@
         return;
       }
     }
-
-    // 注意：绝不使用 position: fixed 悬浮定位，避免遮挡原生控件
   }
 
   function init() {
