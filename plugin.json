@@ -1,0 +1,6 @@
+{
+  "name": "chat-to-project",
+  "description": "一键将普通/全局对话无缝平移至本地项目工作区，自动导出讨论背景、转移临时文件并初始化工程上下文 (Migrate global conversations to project workspace seamlessly)",
+  "version": "1.0.0",
+  "author": "Antigravity Community"
+}
