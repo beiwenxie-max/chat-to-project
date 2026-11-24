@@ -1,0 +1,22 @@
+{
+  "name": "chat-to-project",
+  "version": "1.1.0",
+  "description": "Antigravity 对话转项目工作区插件与客户端界面嵌入补丁 (Migrate global conversations to project workspace & client UI patch)",
+  "main": "patcher/install.js",
+  "scripts": {
+    "patch": "node patcher/install.js",
+    "unpatch": "node patcher/uninstall.js"
+  },
+  "keywords": [
+    "antigravity",
+    "google-antigravity",
+    "chat-to-project",
+    "electron-patch",
+    "ui-injection"
+  ],
+  "author": "Antigravity Community",
+  "license": "MIT",
+  "devDependencies": {
+    "@electron/asar": "3.2.14"
+  }
+}
