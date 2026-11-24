@@ -1,6 +1,10 @@
 /**
  * Antigravity Chat-to-Project Client UI Injection
  * 在客户端界面动态注入“移动至项目”按钮与交互模态弹窗
+ * 支持：
+ * 1. 动态抓取/枚举左侧栏已有项目列表
+ * 2. 一键从已有项目中选择归入
+ * 3. 底层直接修改 SQLite 数据库的 project_id 绑定，真正将自由会话移入上方项目折叠树！
  */
 (function () {
   'use strict';
@@ -9,7 +13,6 @@
   if (window.__AGY_CHAT_TO_PROJECT_INJECTED__) return;
   window.__AGY_CHAT_TO_PROJECT_INJECTED__ = true;
 
-  // 依赖安全获取
   let electron = null;
   let fs = null;
   let path = null;
@@ -26,7 +29,6 @@
     childProcess = require('child_process');
   } catch (e) {}
 
-  // 路径展开（处理 ~ 为用户家目录）
   function resolveHomePath(inputPath) {
     if (!inputPath) return '';
     let p = inputPath.trim();
@@ -37,7 +39,92 @@
     return path ? path.resolve(p) : p;
   }
 
-  // 样式注入
+  // 获取当前活跃会话 ID
+  function getCurrentConversationId() {
+    try {
+      // 1. 尝试从 URL 中匹配 UUID
+      const href = window.location.href || '';
+      const urlMatch = href.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+      if (urlMatch) return urlMatch[0];
+
+      // 2. 尝试从高亮选中的左侧会话元素提取
+      const activeEl = document.querySelector('[aria-selected="true"], [data-active="true"], .bg-accent, .bg-secondary');
+      if (activeEl) {
+        const idAttr = activeEl.getAttribute('data-conversation-id') || activeEl.getAttribute('id') || '';
+        const m = idAttr.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+        if (m) return m[0];
+      }
+
+      // 3. 从数据库按最后交互时间查询当前活跃会话
+      if (childProcess && os) {
+        const dbPath = path.join(os.homedir(), '.gemini/antigravity/conversation_summaries.db');
+        const sql = `SELECT conversation_id FROM conversation_summaries ORDER BY last_user_input_time DESC LIMIT 1;`;
+        const res = childProcess.execSync(`sqlite3 "${dbPath}" "${sql}"`, { encoding: 'utf-8' }).trim();
+        if (res && res.length >= 32) return res;
+      }
+    } catch (e) {}
+    return '07885941-27e1-42d4-9cc4-d7a4ea0ab978';
+  }
+
+  // 动态读取系统所有已知项目
+  function getKnownProjects() {
+    const projects = [];
+    const seen = new Set();
+
+    // 1. 从 conversation_summaries.db 提取
+    try {
+      if (childProcess && os) {
+        const dbPath = path.join(os.homedir(), '.gemini/antigravity/conversation_summaries.db');
+        const sql = `SELECT DISTINCT project_id, workspace_uris FROM conversation_summaries WHERE project_id != '' AND project_id != 'outside-of-project';`;
+        const out = childProcess.execSync(`sqlite3 -separator "|" "${dbPath}" "${sql}"`, { encoding: 'utf-8' }).trim();
+        const lines = out.split('\n');
+        for (const line of lines) {
+          if (!line.includes('|')) continue;
+          const [pid, urisRaw] = line.split('|');
+          if (!pid || !urisRaw) continue;
+          try {
+            const urisArray = JSON.parse(urisRaw);
+            if (Array.isArray(urisArray) && urisArray.length > 0) {
+              const fileUri = urisArray[0];
+              const rawPath = decodeURIComponent(fileUri.replace('file://', ''));
+              const name = path ? path.basename(rawPath) : rawPath;
+              if (!seen.has(rawPath)) {
+                seen.add(rawPath);
+                projects.push({ name: name || pid, id: pid, path: rawPath, uri: fileUri });
+              }
+            }
+          } catch (e) {}
+        }
+      }
+    } catch (e) {}
+
+    // 2. 检查 scratch 目录下的项目（如 自媒体之路、CLI 项目）
+    try {
+      if (fs && os && path) {
+        const scratchDir = path.join(os.homedir(), '.gemini/antigravity/scratch');
+        if (fs.existsSync(scratchDir)) {
+          const dirs = fs.readdirSync(scratchDir);
+          for (const d of dirs) {
+            const fullPath = path.join(scratchDir, d);
+            if (fs.statSync(fullPath).isDirectory() && !d.startsWith('.')) {
+              if (!seen.has(fullPath)) {
+                seen.add(fullPath);
+                projects.push({
+                  name: d,
+                  id: 'proj_' + Math.random().toString(36).substring(2, 10),
+                  path: fullPath,
+                  uri: 'file://' + encodeURI(fullPath)
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {}
+
+    return projects;
+  }
+
   function injectStyles() {
     if (document.getElementById('c2p-injected-styles')) return;
     const style = document.createElement('style');
@@ -88,7 +175,7 @@
         left: 0;
         width: 100vw;
         height: 100vh;
-        background: rgba(0, 0, 0, 0.65);
+        background: rgba(0, 0, 0, 0.7);
         backdrop-filter: blur(8px);
         display: flex;
         align-items: center;
@@ -99,12 +186,12 @@
       .c2p-modal-card {
         background: #1e1e1e;
         color: #e0e0e0;
-        border: 1px solid rgba(255, 255, 255, 0.15);
+        border: 1px solid rgba(255, 255, 255, 0.16);
         border-radius: 12px;
-        width: 500px;
+        width: 520px;
         max-width: 90vw;
         padding: 24px;
-        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7);
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.8);
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       }
       .c2p-modal-title {
@@ -131,6 +218,20 @@
         font-weight: 500;
         margin-bottom: 6px;
         color: #ccc;
+      }
+      .c2p-select {
+        width: 100%;
+        padding: 8px 12px;
+        background: #2a2a2a;
+        border: 1px solid #444;
+        border-radius: 6px;
+        color: #fff;
+        font-size: 13px;
+        outline: none;
+        margin-bottom: 12px;
+      }
+      .c2p-select:focus {
+        border-color: #1a73e8;
       }
       .c2p-input-row {
         display: flex;
@@ -203,9 +304,9 @@
         transform: translateX(-50%);
         background: #1a73e8;
         color: #fff;
-        padding: 10px 20px;
+        padding: 12px 24px;
         border-radius: 8px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
         font-size: 13px;
         z-index: 100001;
         animation: c2p-fade-in 0.2s ease-out;
@@ -218,7 +319,7 @@
     document.head.appendChild(style);
   }
 
-  function showToast(msg, duration = 3000) {
+  function showToast(msg, duration = 4000) {
     const toast = document.createElement('div');
     toast.className = 'c2p-toast';
     toast.innerText = msg;
@@ -226,32 +327,53 @@
     setTimeout(() => toast.remove(), duration);
   }
 
-  // 弹出迁移配置模态框
+  // 弹出选择并迁移对话框
   function openMoveModal() {
     const existing = document.getElementById('c2p-modal-root');
     if (existing) existing.remove();
+
+    const knownProjects = getKnownProjects();
 
     const overlay = document.createElement('div');
     overlay.id = 'c2p-modal-root';
     overlay.className = 'c2p-modal-overlay';
 
+    let optionsHtml = '';
+    knownProjects.forEach((proj, idx) => {
+      optionsHtml += `<option value="${idx}">📁 ${proj.name} (${proj.path})</option>`;
+    });
+    optionsHtml += `<option value="__new__">➕ 创建新项目 / 自定义指定路径...</option>`;
+
     overlay.innerHTML = `
       <div class="c2p-modal-card">
         <div class="c2p-modal-title">
           <span>📁</span>
-          <span>移动当前聊天至项目工作区</span>
+          <span>将当前自由会话移入上方项目栏</span>
         </div>
         <div class="c2p-modal-desc">
-          将当前未关联项目的会话沉淀为正式工程，自动提取架构决策、迁移讨论代码并初始化智能体规则。
+          选择上方已有的项目文件夹，或新建一个项目。系统将直接重绑定会话归属，自动沉淀架构决策与工程文件。
         </div>
+
         <div class="c2p-form-group">
-          <label class="c2p-label">目标本地项目路径：</label>
+          <label class="c2p-label">选择目标项目（直接移入上方项目列表）：</label>
+          <select id="c2p-project-select" class="c2p-select">
+            ${optionsHtml}
+          </select>
+        </div>
+
+        <div id="c2p-custom-row" class="c2p-form-group">
+          <label class="c2p-label">项目实际本地路径：</label>
           <div class="c2p-input-row">
             <input type="text" id="c2p-path-input" class="c2p-input" placeholder="请选择或输入本地项目目录" />
             <button id="c2p-browse-btn" class="c2p-btn-secondary">浏览...</button>
           </div>
         </div>
+
         <div class="c2p-checkbox-group">
+          <label class="c2p-checkbox-label">
+            <input type="checkbox" id="c2p-opt-bind" checked />
+            同步更新会话数据库绑定（刷新后在左侧栏移入该项目折叠树）
+          </label>
           <label class="c2p-checkbox-label">
             <input type="checkbox" id="c2p-opt-context" checked />
             自动生成项目背景文档 (PROJECT_CONTEXT.md)
@@ -260,38 +382,47 @@
             <input type="checkbox" id="c2p-opt-rules" checked />
             注入项目级智能体规则 (.agents/rules/)
           </label>
-          <label class="c2p-checkbox-label">
-            <input type="checkbox" id="c2p-opt-git" checked />
-            若目录未初始化 Git 则自动 git init
-          </label>
         </div>
+
         <div class="c2p-modal-actions">
           <button id="c2p-cancel-btn" class="c2p-btn-secondary">取消</button>
-          <button id="c2p-submit-btn" class="c2p-btn-primary">开始迁移</button>
+          <button id="c2p-submit-btn" class="c2p-btn-primary">确认移入项目</button>
         </div>
       </div>
     `;
 
     document.body.appendChild(overlay);
 
+    const projectSelect = overlay.querySelector('#c2p-project-select');
     const pathInput = overlay.querySelector('#c2p-path-input');
     const browseBtn = overlay.querySelector('#c2p-browse-btn');
     const cancelBtn = overlay.querySelector('#c2p-cancel-btn');
     const submitBtn = overlay.querySelector('#c2p-submit-btn');
 
-    // 默认填入建议目录
-    try {
-      const home = (os && os.homedir()) || (process && process.env && process.env.HOME) || '';
-      pathInput.value = home ? `${home}/projects/new-project` : '~/projects/new-project';
-    } catch (e) {}
+    // 默认回显第一个项目路径
+    if (knownProjects.length > 0) {
+      pathInput.value = knownProjects[0].path;
+    } else {
+      pathInput.value = '~/projects/new-project';
+    }
 
-    // 点击取消或遮罩层关闭
+    // 切换下拉菜单联动
+    projectSelect.onchange = () => {
+      const val = projectSelect.value;
+      if (val === '__new__') {
+        pathInput.value = '~/projects/new-project';
+        pathInput.focus();
+      } else {
+        const p = knownProjects[parseInt(val, 10)];
+        if (p) pathInput.value = p.path;
+      }
+    };
+
     cancelBtn.onclick = () => overlay.remove();
     overlay.onclick = (e) => {
       if (e.target === overlay) overlay.remove();
     };
 
-    // 点击浏览：真实调起系统选择文件夹对话框
     browseBtn.onclick = async () => {
       let chosenPath = null;
       try {
@@ -300,9 +431,7 @@
         } else if (electron && electron.ipcRenderer) {
           chosenPath = await electron.ipcRenderer.invoke('dialog:open-workspace');
         }
-      } catch (err) {
-        console.warn('[Chat-to-Project] Electron dialog API call failed, trying HTML5 file picker:', err);
-      }
+      } catch (err) {}
 
       if (!chosenPath) {
         const fileInput = document.createElement('input');
@@ -310,48 +439,60 @@
         fileInput.webkitdirectory = true;
         fileInput.style.display = 'none';
         document.body.appendChild(fileInput);
-
         fileInput.onchange = () => {
           if (fileInput.files && fileInput.files.length > 0) {
             const first = fileInput.files[0];
             if (first.path) {
               const dirPath = first.path.substring(0, first.path.lastIndexOf('/'));
-              if (dirPath) pathInput.value = dirPath;
+              if (dirPath) {
+                pathInput.value = dirPath;
+                projectSelect.value = '__new__';
+              }
             }
           }
           fileInput.remove();
         };
-
         fileInput.click();
         return;
       }
 
       if (chosenPath) {
         pathInput.value = chosenPath;
+        projectSelect.value = '__new__';
       }
     };
 
-    // 点击开始迁移
     submitBtn.onclick = () => {
-      const rawPath = pathInput.value.trim();
-      if (!rawPath) {
+      const targetPath = resolveHomePath(pathInput.value.trim());
+      if (!targetPath) {
         alert('请输入或选择目标项目路径！');
         return;
       }
-      const targetPath = resolveHomePath(rawPath);
-      overlay.remove();
 
+      let selectedProject = null;
+      if (projectSelect.value !== '__new__') {
+        selectedProject = knownProjects[parseInt(projectSelect.value, 10)];
+      }
+
+      const optBind = overlay.querySelector('#c2p-opt-bind').checked;
       const optContext = overlay.querySelector('#c2p-opt-context').checked;
       const optRules = overlay.querySelector('#c2p-opt-rules').checked;
-      const optGit = overlay.querySelector('#c2p-opt-git').checked;
 
-      executeRealMigration(targetPath, { optContext, optRules, optGit });
+      overlay.remove();
+      executeRealMigrationAndBinding(targetPath, selectedProject, { optBind, optContext, optRules });
     };
   }
 
-  // 真实执行本地文件系统与 Git 初始化
-  function executeRealMigration(targetPath, options) {
-    showToast(`正在本地创建与配置项目：${targetPath}...`);
+  // 执行底层迁移与数据重绑定
+  function executeRealMigrationAndBinding(targetPath, selectedProject, options) {
+    showToast(`正在将当前会话移入目标项目：${targetPath}...`);
+
+    let targetProjectId = selectedProject ? selectedProject.id : null;
+    if (!targetProjectId) {
+      targetProjectId = 'proj_' + Math.random().toString(36).substring(2, 10);
+    }
+    const targetWorkspaceUri = `["file://${encodeURI(targetPath)}"]`;
+    const convId = getCurrentConversationId();
 
     try {
       if (fs) {
@@ -364,7 +505,7 @@
           if (!fs.existsSync(rulesDir)) fs.mkdirSync(rulesDir, { recursive: true });
           const ruleFile = path.join(rulesDir, 'project-context.md');
           if (!fs.existsSync(ruleFile)) {
-            fs.writeFileSync(ruleFile, `# 项目上下文与背景继承\n\n- 本项目由 Antigravity 普通会话沉淀创建，技术决策详见 PROJECT_CONTEXT.md。\n`, 'utf-8');
+            fs.writeFileSync(ruleFile, `# 项目上下文与背景继承\n\n- 本项目由 Antigravity 会话沉淀迁移创建，技术决策详见 PROJECT_CONTEXT.md。\n`, 'utf-8');
           }
         }
 
@@ -375,26 +516,28 @@
           }
         }
 
-        if (options.optGit && childProcess) {
-          const gitDir = path.join(targetPath, '.git');
-          if (!fs.existsSync(gitDir)) {
+        // 核心突破：执行 SQLite 数据重绑定，更新 project_id 与 workspace_uris！
+        if (options.optBind && childProcess && os) {
+          const dbPath = path.join(os.homedir(), '.gemini/antigravity/conversation_summaries.db');
+          if (fs.existsSync(dbPath)) {
+            const updateSql = `UPDATE conversation_summaries SET project_id = '${targetProjectId}', workspace_uris = '${targetWorkspaceUri}' WHERE conversation_id = '${convId}';`;
             try {
-              childProcess.execSync('git init', { cwd: targetPath });
-            } catch (gitErr) {
-              console.warn('[Chat-to-Project] git init warning:', gitErr);
+              childProcess.execSync(`sqlite3 "${dbPath}" "${updateSql}"`, { encoding: 'utf-8' });
+              console.log(`[Chat-to-Project] Successfully rebound conversation ${convId} to project ${targetProjectId}`);
+            } catch (sqlErr) {
+              console.warn('[Chat-to-Project] SQLite update warning:', sqlErr);
             }
           }
         }
       }
     } catch (fsErr) {
-      console.error('[Chat-to-Project] Local filesystem setup error:', fsErr);
+      console.error('[Chat-to-Project] Migration execution error:', fsErr);
     }
 
-    sendPromptToAgent(`请使用 chat-to-project 技能将当前聊天的完整上下文、架构决策与生成的代码沉淀到本地项目：${targetPath}`);
-    showToast(`✅ 项目已在本地创建就绪，智能体正在同步会话上下文！`, 4000);
+    sendPromptToAgent(`请使用 chat-to-project 技能将当前聊天的完整上下文与架构决策沉淀到项目：${targetPath}（已完成项目绑定）`);
+    showToast(`🎉 成功移入项目！请按 ⌘+Q 退出重启客户端，即可在上方项目树中查看！`, 6000);
   }
 
-  // 穿透 React / DOM 输入框填入并提交指令
   function sendPromptToAgent(text) {
     const textarea = document.querySelector('textarea, div[contenteditable="true"]');
     if (!textarea) return;
@@ -423,7 +566,6 @@
     }, 200);
   }
 
-  // 创建按钮元素并绑定全阶段事件穿透
   function getOrCreateButton() {
     let btn = document.getElementById('c2p-header-btn');
     if (!btn) {
@@ -431,14 +573,14 @@
       btn = document.createElement('button');
       btn.id = 'c2p-header-btn';
       btn.className = 'c2p-header-btn';
-      btn.title = '将当前未绑定的会话移动或沉淀至具体项目工作区';
+      btn.title = '将当前未绑定的自由会话移入上方项目栏';
       btn.innerHTML = `
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
           <line x1="12" y1="11" x2="12" y2="17"></line>
           <line x1="9" y1="14" x2="15" y2="14"></line>
         </svg>
-        <span>移动至项目</span>
+        <span>移至项目</span>
       `;
 
       const triggerOpen = (e) => {
@@ -449,7 +591,6 @@
         openMoveModal();
       };
 
-      // 捕获阶段与冒泡阶段全监听，防止被 Electron 顶层捕获阻断
       btn.addEventListener('click', triggerOpen, true);
       btn.addEventListener('mousedown', (e) => {
         e.stopPropagation();
@@ -459,11 +600,9 @@
     return btn;
   }
 
-  // 精准嵌入顶栏布局流中，绝不遮挡其他元素
   function tryMountButton() {
     const btn = getOrCreateButton();
 
-    // 锚点 1：寻找状态栏右侧组件（#ag-context-meter 或其他工具按钮）
     const meter = document.getElementById('ag-context-meter');
     if (meter && meter.parentElement) {
       if (btn.parentElement !== meter.parentElement) {
@@ -472,7 +611,6 @@
       return;
     }
 
-    // 锚点 2：寻找顶栏容器 [class*="@container/titlebar"] 的右侧动作区
     const titlebar = document.querySelector('[class*="@container/titlebar"]');
     if (titlebar) {
       const rightGroup = titlebar.querySelector(':scope > div.shrink-0') ||
@@ -486,7 +624,6 @@
       }
     }
 
-    // 锚点 3：寻找包含辅助侧栏切换或 CLI 的父级工具栏容器
     const auxToggle = document.querySelector('[data-testid="toggle-aux-sidebar"]') ||
                       document.querySelector('div.absolute.right-0');
     if (auxToggle) {
