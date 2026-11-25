@@ -2,6 +2,10 @@
 
 /**
  * Antigravity Chat-to-Project 客户端补丁安装器
+ * 支持：
+ * 1. 注入前端渲染进程 UI (inject-ui.js -> preload.js)
+ * 2. 注入主进程 IPC 服务 (main-ipc.js -> utils.js/chat-to-project-main.js)
+ * 3. 自动打包并重新签名
  */
 
 const fs = require('fs');
@@ -11,6 +15,7 @@ const { execSync } = require('child_process');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const INJECT_SCRIPT_PATH = path.join(__dirname, 'inject-ui.js');
+const MAIN_IPC_SCRIPT_PATH = path.join(__dirname, 'main-ipc.js');
 
 function findAppAsar() {
   const platform = os.platform();
@@ -49,7 +54,7 @@ function runCommand(cmd) {
 }
 
 async function main() {
-  console.log('🚀 开始安装 Chat-to-Project 客户端界面补丁...\n');
+  console.log('🚀 开始安装 Chat-to-Project 客户端界面与主进程双轨补丁...\n');
 
   const asarPath = findAppAsar();
   if (!asarPath) {
@@ -75,17 +80,38 @@ async function main() {
     console.log('📂 正在解包 app.asar...');
     runCommand(`npx -y @electron/asar@3.2.14 extract "${asarPath}" "${tempExtractDir}"`);
 
-    // 3. 寻找 preload.js 并注入 UI 脚本
+    // 3. 注入主进程 IPC 服务
+    console.log('🔧 正在注入主进程 IPC 服务 (突破渲染沙箱限制)...');
+    const targetMainScript = path.join(tempExtractDir, 'dist', 'chat-to-project-main.js');
+    fs.copyFileSync(MAIN_IPC_SCRIPT_PATH, targetMainScript);
+
+    const utilsPath = path.join(tempExtractDir, 'dist', 'utils.js');
+    if (fs.existsSync(utilsPath)) {
+      let utilsContent = fs.readFileSync(utilsPath, 'utf-8');
+      const mainFlagStart = '// --- Chat-to-Project Main IPC Start ---';
+      const mainFlagEnd = '// --- Chat-to-Project Main IPC End ---';
+
+      if (utilsContent.includes(mainFlagStart)) {
+        const regex = new RegExp(`${mainFlagStart}[\\s\\S]*?${mainFlagEnd}`, 'g');
+        utilsContent = utilsContent.replace(regex, '');
+      }
+
+      const mainInjection = `\n${mainFlagStart}\ntry { require("./chat-to-project-main").registerMainIpc(); } catch (e) { console.error("[Chat-to-Project] Main IPC init error:", e); }\n${mainFlagEnd}\n`;
+      utilsContent += mainInjection;
+      fs.writeFileSync(utilsPath, utilsContent, 'utf-8');
+      console.log('✅ 主进程 IPC 注入成功');
+    }
+
+    // 4. 注入 Preload 前端 UI
+    console.log('💉 正在注入前端卡片式项目导入弹窗与状态栏按钮...');
     const preloadPath = path.join(tempExtractDir, 'dist', 'preload.js');
     if (!fs.existsSync(preloadPath)) {
       throw new Error(`未找到 preload.js 文件: ${preloadPath}`);
     }
 
-    console.log('💉 正在注入客户端前端按钮与交互模态框脚本...');
     const injectContent = fs.readFileSync(INJECT_SCRIPT_PATH, 'utf-8');
     let preloadContent = fs.readFileSync(preloadPath, 'utf-8');
 
-    // 清除可能存在的旧注入
     const flagStart = '// --- Chat-to-Project UI Injection Start ---';
     const flagEnd = '// --- Chat-to-Project UI Injection End ---';
     if (preloadContent.includes(flagStart)) {
@@ -96,10 +122,10 @@ async function main() {
     const wrappedInjection = `\n${flagStart}\n${injectContent}\n${flagEnd}\n`;
     preloadContent += wrappedInjection;
     fs.writeFileSync(preloadPath, preloadContent, 'utf-8');
+    console.log('✅ 前端 UI 脚本注入成功');
 
-    // 4. 重新打包
+    // 5. 重新打包
     console.log('📦 正在重新打包 app.asar...');
-    // 检查是否有 unpacked 目录
     const unpackedDir = asarPath + '.unpacked';
     let unpackArgs = '';
     if (fs.existsSync(unpackedDir)) {
@@ -107,11 +133,11 @@ async function main() {
     }
     runCommand(`npx -y @electron/asar@3.2.14 pack "${tempExtractDir}" "${tempPackAsar}" ${unpackArgs}`);
 
-    // 5. 替换新 asar
+    // 6. 替换新 asar
     fs.copyFileSync(tempPackAsar, asarPath);
     console.log('✅ app.asar 替换成功！');
 
-    // 6. macOS 重新签名
+    // 7. macOS 深度重新签名
     if (os.platform() === 'darwin') {
       console.log('🔏 正在执行 macOS 深度重新签名...');
       const appPath = asarPath.substring(0, asarPath.indexOf('.app') + 4);
@@ -125,10 +151,9 @@ async function main() {
 
     console.log('\n🎉 补丁安装成功！');
     console.log('👉 请完全退出并重新启动 Antigravity 客户端。');
-    console.log('👉 启动后，在聊天窗口右上角即可看到全新的【移动至项目】按钮！\n');
+    console.log('👉 点击【移至项目】将打开全新的卡片式导入面板，已有项目直接可选并自动绑定！\n');
 
   } finally {
-    // 清理临时目录
     try {
       if (fs.existsSync(tempExtractDir)) fs.rmSync(tempExtractDir, { recursive: true, force: true });
       if (fs.existsSync(tempPackAsar)) fs.rmSync(tempPackAsar, { force: true });
