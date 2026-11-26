@@ -2,8 +2,9 @@
  * Antigravity Chat-to-Project Main Process IPC Handler
  * 运行在 Electron 主进程（无渲染沙箱限制），负责：
  * 1. 调用 Language Server 官方 RPC (ListProjects / ReadProjects) 获取真实项目列表
- * 2. 同步修改 conversations/<id>.db (Protobuf trajectory_metadata_blob) 与 conversation_summaries.db
- * 3. 在目标项目落地 PROJECT_CONTEXT.md 与 .agents/rules/
+ * 2. 同步修改 conversations/<id>.db (Protobuf trajectory_metadata_blob)
+ * 3. 调用官方 RPC JetboxWriteSummary，实时同步内存、agyhub_summaries_proto.pb 与响应式 UI！
+ * 4. 补全 conversation_summaries.db 的标题与预览无损保留
  */
 
 const { ipcMain, app } = require('electron');
@@ -14,7 +15,6 @@ const http = require('http');
 const https = require('https');
 const { execFileSync } = require('child_process');
 
-// 动态获取当前正在运行的 Language Server 地址与 CSRF Token
 function getActiveLsAuth() {
   let baseUrl = '';
   let csrfToken = '';
@@ -47,7 +47,6 @@ function getActiveLsAuth() {
   return { baseUrl, csrfToken };
 }
 
-// 发送 JSON POST 请求到本地 Language Server
 function callLanguageServer(method, bodyObj = {}) {
   return new Promise((resolve, reject) => {
     const { baseUrl, csrfToken } = getActiveLsAuth();
@@ -85,7 +84,7 @@ function callLanguageServer(method, bodyObj = {}) {
       res.on('data', chunk => { data += chunk; });
       res.on('end', () => {
         try {
-          resolve(JSON.parse(data));
+          resolve(JSON.parse(data || '{}'));
         } catch (err) {
           reject(new Error(`Invalid JSON from LS ${method}: ${data.substring(0, 120)}`));
         }
@@ -101,7 +100,6 @@ function callLanguageServer(method, bodyObj = {}) {
   });
 }
 
-// 从 Project 对象提取真实本地路径与 URI
 function extractProjectLocation(proj) {
   let uri = '';
   let localPath = '';
@@ -128,7 +126,6 @@ function extractProjectLocation(proj) {
   return { uri, localPath };
 }
 
-// 精确更新 trajectory_metadata_blob 中的 Protobuf field 18 (tag 0x92 0x01: projectId)
 function updateTrajectoryMetadataBlob(convDbPath, newProjectId) {
   if (!fs.existsSync(convDbPath)) return false;
 
@@ -141,7 +138,6 @@ function updateTrajectoryMetadataBlob(convDbPath, newProjectId) {
   const buf = Buffer.from(hexOut, 'hex');
   const newIdBuf = Buffer.from(newProjectId, 'utf-8');
 
-  // 1. 优先匹配标准的 outside-of-project 字节模式: 92 01 12 <outside-of-project>
   const outsidePattern = Buffer.from('920112' + Buffer.from('outside-of-project').toString('hex'), 'hex');
   let newBuf = null;
 
@@ -154,7 +150,6 @@ function updateTrajectoryMetadataBlob(convDbPath, newProjectId) {
       buf.subarray(exactIdx + outsidePattern.length)
     ]);
   } else {
-    // 2. 匹配任意的 92 01 <len> <ascii_project_id>
     const tag = Buffer.from([0x92, 0x01]);
     let searchPos = buf.lastIndexOf(tag);
     if (searchPos !== -1 && searchPos + 2 < buf.length) {
@@ -173,7 +168,6 @@ function updateTrajectoryMetadataBlob(convDbPath, newProjectId) {
     }
   }
 
-  // 3. 若原有 blob 中没有 field 18，则安全追加在末尾
   if (!newBuf) {
     newBuf = Buffer.concat([
       buf,
@@ -191,19 +185,27 @@ function updateTrajectoryMetadataBlob(convDbPath, newProjectId) {
   return true;
 }
 
+// 格式化 SQLite datetime 为 RFC3339 (供 Protobuf Timestamp 使用)
+function toRfc3339(dtStr) {
+  if (!dtStr) return new Date().toISOString();
+  try {
+    return new Date(dtStr).toISOString();
+  } catch (e) {
+    return new Date().toISOString();
+  }
+}
+
 function registerMainIpc() {
   if (global.__AGY_CHAT_TO_PROJECT_MAIN_REGISTERED__) return;
   global.__AGY_CHAT_TO_PROJECT_MAIN_REGISTERED__ = true;
 
   console.log('[Chat-to-Project] Registering main process IPC handlers...');
 
-  // 1. 获取所有真实项目（优先官方 ListProjects + ReadProjects RPC）
   ipcMain.handle('chat-to-project:get-projects', async () => {
     const projects = [];
     const seenIds = new Set();
     const homedir = os.homedir();
 
-    // 1.1 调用 Language Server 官方 RPC 获取真实项目清单
     try {
       const listRes = await callLanguageServer('ListProjects', {});
       const ids = (listRes?.projectIds || []).filter(id => id && id !== 'outside-of-project');
@@ -211,7 +213,6 @@ function registerMainIpc() {
         const readRes = await callLanguageServer('ReadProjects', { ids });
         const rawProjects = readRes?.projects || [];
         for (const proj of rawProjects) {
-          // 过滤系统内置 sidecar（如 swarm_board, agy-dart/dashboard）
           if (proj.sidecar) continue;
           const { uri, localPath } = extractProjectLocation(proj);
           seenIds.add(proj.id);
@@ -227,7 +228,6 @@ function registerMainIpc() {
       console.warn('[Chat-to-Project] Official LS RPC get-projects fallback:', rpcErr.message);
     }
 
-    // 1.2 从 conversation_summaries.db 补充遗漏的项目
     const dbPath = path.join(homedir, '.gemini/antigravity/conversation_summaries.db');
     if (fs.existsSync(dbPath)) {
       try {
@@ -259,7 +259,6 @@ function registerMainIpc() {
     return projects;
   });
 
-  // 2. 获取最近活跃的自由会话 ID（用于前端兜底精准识别）
   ipcMain.handle('chat-to-project:get-active-conv-id', async () => {
     const dbPath = path.join(os.homedir(), '.gemini/antigravity/conversation_summaries.db');
     if (fs.existsSync(dbPath)) {
@@ -272,7 +271,6 @@ function registerMainIpc() {
     return '';
   });
 
-  // 3. 执行真正的双库重绑定与本地文件落盘
   ipcMain.handle('chat-to-project:bind-conversation', async (event, payload) => {
     const { convId, targetPath, targetProjectId, targetUri, options = {} } = payload;
     if (!targetPath) throw new Error('缺少目标项目路径');
@@ -283,12 +281,10 @@ function registerMainIpc() {
       ? targetPath.replace(/^~(?=$|\/|\\)/, homedir)
       : path.resolve(targetPath);
 
-    // 3.1 确保本地项目目录真实存在
     if (!fs.existsSync(resolvedPath)) {
       fs.mkdirSync(resolvedPath, { recursive: true });
     }
 
-    // 3.2 自动生成 PROJECT_CONTEXT.md
     if (options.optContext !== false) {
       const contextFile = path.join(resolvedPath, 'PROJECT_CONTEXT.md');
       if (!fs.existsSync(contextFile)) {
@@ -302,7 +298,6 @@ function registerMainIpc() {
       }
     }
 
-    // 3.3 注入 .agents/rules/
     if (options.optRules !== false) {
       const rulesDir = path.join(resolvedPath, '.agents', 'rules');
       if (!fs.existsSync(rulesDir)) fs.mkdirSync(rulesDir, { recursive: true });
@@ -316,16 +311,45 @@ function registerMainIpc() {
       }
     }
 
-    // 3.4 确定最终 Project ID 与 Workspace URI
     const finalProjectId = targetProjectId || ('proj_' + Date.now().toString(36));
     const finalUri = targetUri || `file://${encodeURI(resolvedPath)}`;
     const targetWorkspaceUriJson = JSON.stringify([finalUri]);
 
     let summaryUpdated = false;
     let blobUpdated = false;
+    let jetboxUpdated = false;
 
     if (options.optBind !== false) {
-      // A. 更新源头：conversations/<convId>.db 的 trajectory_metadata_blob
+      const summaryDbPath = path.join(homedir, '.gemini/antigravity/conversation_summaries.db');
+
+      // 1. 先备份读取原有标题与元数据
+      let origTitle = '';
+      let origPreview = '';
+      let origStepCount = 1;
+      let origLastMod = '';
+      let origLastInput = '';
+      let origLastInputIdx = 0;
+
+      if (fs.existsSync(summaryDbPath)) {
+        try {
+          const rowOut = execFileSync('/usr/bin/sqlite3', [
+            '-separator', '\x1F',
+            summaryDbPath,
+            `SELECT title, preview, step_count, last_modified_time, last_user_input_time, last_user_input_step_index FROM conversation_summaries WHERE conversation_id = '${convId}';`
+          ], { encoding: 'utf-8' }).trim();
+          if (rowOut) {
+            const parts = rowOut.split('\x1F');
+            origTitle = parts[0] || '';
+            origPreview = parts[1] || '';
+            origStepCount = parseInt(parts[2], 10) || 1;
+            origLastMod = parts[3] || '';
+            origLastInput = parts[4] || '';
+            origLastInputIdx = parseInt(parts[5], 10) || 0;
+          }
+        } catch (e) {}
+      }
+
+      // 2. 更新源头：conversations/<convId>.db 的 trajectory_metadata_blob
       const convDbPath = path.join(homedir, '.gemini/antigravity/conversations', `${convId}.db`);
       try {
         blobUpdated = updateTrajectoryMetadataBlob(convDbPath, finalProjectId);
@@ -333,11 +357,60 @@ function registerMainIpc() {
         console.error('[Chat-to-Project] Blob update error:', blobErr.message);
       }
 
-      // B. 更新汇总表：conversation_summaries.db
-      const summaryDbPath = path.join(homedir, '.gemini/antigravity/conversation_summaries.db');
+      // 3. 获取现有 TrajectorySummary 对象并调用官方 JetboxWriteSummary RPC（同步内存 + agyhub_summaries_proto.pb + 响应式 UI）
+      try {
+        let summaryObj = null;
+        try {
+          const allRes = await callLanguageServer('GetAllCascadeTrajectories', {});
+          if (allRes?.trajectorySummaries?.[convId]) {
+            summaryObj = allRes.trajectorySummaries[convId];
+          }
+        } catch (e) {}
+
+        if (!summaryObj) {
+          let trajId = '';
+          try {
+            const trajRes = await callLanguageServer('GetCascadeTrajectory', { cascadeId: convId });
+            trajId = trajRes?.trajectory?.trajectoryId || '';
+          } catch (e) {}
+
+          summaryObj = {
+            summary: origTitle || 'Migrated Conversation',
+            stepCount: origStepCount,
+            lastModifiedTime: toRfc3339(origLastMod),
+            trajectoryId: trajId,
+            status: 'CASCADE_RUN_STATUS_IDLE',
+            createdTime: toRfc3339(origLastMod),
+            lastUserInputTime: toRfc3339(origLastInput),
+            lastUserInputStepIndex: origLastInputIdx,
+            annotations: {
+              title: origTitle || 'Migrated Conversation'
+            },
+            trajectoryType: 'CORTEX_TRAJECTORY_TYPE_CASCADE'
+          };
+        }
+
+        summaryObj.trajectoryMetadata = summaryObj.trajectoryMetadata || {};
+        summaryObj.trajectoryMetadata.rootConversationId = convId;
+        summaryObj.trajectoryMetadata.projectId = finalProjectId;
+        summaryObj.trajectoryMetadata.workspaceUris = [finalUri];
+        summaryObj.trajectoryMetadata.workspaces = [{ workspaceFolderAbsoluteUri: finalUri }];
+
+        await callLanguageServer('JetboxWriteSummary', {
+          cascadeId: convId,
+          summary: summaryObj
+        });
+        jetboxUpdated = true;
+      } catch (rpcErr) {
+        console.warn('[Chat-to-Project] JetboxWriteSummary warning:', rpcErr.message);
+      }
+
+      // 4. 确保 conversation_summaries.db 更新完整并保留原有 title 和 preview
       if (fs.existsSync(summaryDbPath)) {
         try {
-          const updateSql = `UPDATE conversation_summaries SET project_id = '${finalProjectId}', workspace_uris = '${targetWorkspaceUriJson.replace(/'/g, "''")}' WHERE conversation_id = '${convId}';`;
+          const safeTitle = origTitle.replace(/'/g, "''");
+          const safePreview = origPreview.replace(/'/g, "''");
+          const updateSql = `UPDATE conversation_summaries SET project_id = '${finalProjectId}', workspace_uris = '${targetWorkspaceUriJson.replace(/'/g, "''")}'${origTitle ? `, title = '${safeTitle}'` : ''}${origPreview ? `, preview = '${safePreview}'` : ''} WHERE conversation_id = '${convId}';`;
           execFileSync('/usr/bin/sqlite3', [summaryDbPath, updateSql], { encoding: 'utf-8' });
           summaryUpdated = true;
         } catch (sqlErr) {
@@ -352,11 +425,11 @@ function registerMainIpc() {
       projectId: finalProjectId,
       workspacePath: resolvedPath,
       summaryUpdated,
-      blobUpdated
+      blobUpdated,
+      jetboxUpdated
     };
   });
 
-  // 4. 一键重启应用（用于使数据库变更立即生效）
   ipcMain.handle('chat-to-project:relaunch-app', async () => {
     setTimeout(() => {
       app.relaunch();
