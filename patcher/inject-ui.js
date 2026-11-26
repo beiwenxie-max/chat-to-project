@@ -15,7 +15,7 @@
   } catch (e) {}
 
   // 获取当前活跃会话 ID
-  function getCurrentConversationId() {
+  async function getCurrentConversationId() {
     try {
       const href = window.location.href || '';
       const urlMatch = href.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
@@ -27,28 +27,30 @@
         const m = idAttr.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
         if (m) return m[0];
       }
+
+      if (electron && electron.ipcRenderer) {
+        const activeId = await electron.ipcRenderer.invoke('chat-to-project:get-active-conv-id');
+        if (activeId) return activeId;
+      }
     } catch (e) {}
-    return '07885941-27e1-42d4-9cc4-d7a4ea0ab978';
+    return '';
   }
 
-  // 从左侧栏 DOM 中扫描可见的项目名称作为前台保底
+  // 从左侧栏 DOM 中扫描可见的项目名称作为保底
   function scanProjectsFromDom() {
     const domProjects = [];
     try {
-      // 遍历左侧栏中可能带有项目/文件夹特征的节点
       const elements = document.querySelectorAll('div, button, a');
       elements.forEach(el => {
         const text = (el.textContent || '').trim();
-        // 匹配常见项目特征或包含项目关键词
-        if (text.includes('字幕工作流') || text.includes('水印擦除') || text.includes('自媒体之路') || text.includes('CLI 项目') || text.includes('Metabolic Agent')) {
+        if (text.includes('字幕工作流') || text.includes('水印擦除') || text.includes('自媒体之路') || text.includes('CLI 项目')) {
           const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
           const firstLine = lines[0];
           if (firstLine && firstLine.length <= 24 && !domProjects.some(p => p.name === firstLine)) {
             domProjects.push({
               name: firstLine,
-              id: 'dom_' + Math.random().toString(36).substring(2, 8),
-              path: '~/projects/' + firstLine,
-              source: 'dom'
+              id: '',
+              path: '~/projects/' + firstLine
             });
           }
         }
@@ -57,7 +59,7 @@
     return domProjects;
   }
 
-  // 异步获取项目列表（通过主进程 IPC 突破沙箱）
+  // 异步获取官方真实项目列表（通过主进程 RPC）
   async function fetchProjectsList() {
     let list = [];
     if (electron && electron.ipcRenderer) {
@@ -68,29 +70,13 @@
       }
     }
 
-    // 若 IPC 返回为空，结合 DOM 保底
     if (!list || list.length === 0) {
       list = scanProjectsFromDom();
     }
 
-    // 默认内置的几个常用候选，防止空白
-    const defaults = [
-      { name: '自媒体之路', path: '~/.gemini/antigravity/scratch/自媒体之路', id: 'scratch_self_media' },
-      { name: '字幕工作流', path: '/Volumes/mac 系统/Users/mini_1/字幕工作流', id: 'c813d717-357d-4b31-af8b-e8600fc4820c' },
-      { name: '水印擦除', path: '/Volumes/移动硬盘/漫剧/水印擦除', id: 'bb40c9d6-d044-425c-b395-eb644643b20d' },
-      { name: 'CLI 项目', path: '~/.gemini/antigravity/scratch/CLI项目', id: 'scratch_cli_project' }
-    ];
-
-    defaults.forEach(def => {
-      if (!list.some(item => item.name === def.name || item.path === def.path)) {
-        list.push(def);
-      }
-    });
-
     return list;
   }
 
-  // 样式注入
   function injectStyles() {
     if (document.getElementById('c2p-injected-styles')) return;
     const style = document.createElement('style');
@@ -199,7 +185,7 @@
         border: 1px solid #1a73e8;
       }
       .c2p-project-list {
-        max-height: 180px;
+        max-height: 200px;
         overflow-y: auto;
         display: flex;
         flex-direction: column;
@@ -218,7 +204,7 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 8px 12px;
+        padding: 9px 12px;
         background: #252525;
         border: 1px solid #333;
         border-radius: 8px;
@@ -249,7 +235,7 @@
       }
       .c2p-card-path {
         font-size: 11px;
-        color: #777;
+        color: #888;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -362,6 +348,47 @@
     setTimeout(() => toast.remove(), duration);
   }
 
+  // 迁移完成后的提示框（带一键重启生效按钮，避免继续发消息导致 LS 内存回写覆盖）
+  function showSuccessDialog(projectName, res) {
+    const existing = document.getElementById('c2p-modal-root');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'c2p-modal-root';
+    overlay.className = 'c2p-modal-overlay';
+
+    overlay.innerHTML = `
+      <div class="c2p-modal-card">
+        <div class="c2p-modal-title">
+          <span>🎉</span>
+          <span>会话已成功绑定至项目【${projectName}】</span>
+        </div>
+        <div class="c2p-modal-desc" style="margin-bottom: 14px;">
+          已完成底层双库同步更新与项目上下文落盘：<br/>
+          • 源数据库 Protobuf 元数据更新：<strong>${res.blobUpdated ? '✅ 成功' : '⚠️ 跳过'}</strong><br/>
+          • 汇总索引表 (project_id) 更新：<strong>${res.summaryUpdated ? '✅ 成功' : '⚠️ 跳过'}</strong><br/>
+          • 目标工作区：<code>${res.workspacePath}</code>
+        </div>
+        <div style="font-size: 12px; color: #ffca28; background: rgba(255, 202, 40, 0.1); padding: 10px 12px; border-radius: 6px; border: 1px solid rgba(255, 202, 40, 0.25);">
+          ⚠️ <strong>注意</strong>：为防止后台服务内存覆盖旧状态，请<strong>不要在当前旧窗口继续发送消息</strong>。点击下方按钮立即重启客户端，重启后该会话将正式出现在上方项目折叠树下！
+        </div>
+        <div class="c2p-modal-actions">
+          <button id="c2p-later-btn" class="c2p-btn-secondary">稍后手动重启</button>
+          <button id="c2p-relaunch-btn" class="c2p-btn-primary">立即重启客户端生效</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    overlay.querySelector('#c2p-later-btn').onclick = () => overlay.remove();
+    overlay.querySelector('#c2p-relaunch-btn').onclick = async () => {
+      if (electron && electron.ipcRenderer) {
+        await electron.ipcRenderer.invoke('chat-to-project:relaunch-app');
+      }
+    };
+  }
+
   // 弹出选择并迁移对话框
   async function openMoveModal() {
     const existing = document.getElementById('c2p-modal-root');
@@ -380,7 +407,7 @@
           <span>将当前自由会话导入项目工作区</span>
         </div>
         <div class="c2p-modal-desc">
-          选择上方已有的项目目录或新建工程。系统将直接完成底层数据库重绑定，刷新后会话自动移入对应项目折叠树！
+          选择上方已有的真实项目或新建工程。系统将同步修改 Protobuf 与 SQLite 双库绑定，重启后会话自动移入对应项目折叠树！
         </div>
 
         <div class="c2p-tab-bar">
@@ -388,14 +415,12 @@
           <button id="c2p-tab-custom" class="c2p-tab-btn">➕ 建立/指定新工程</button>
         </div>
 
-        <!-- 视图 1：已有项目卡片列表 -->
         <div id="c2p-view-existing">
           <div id="c2p-cards-container" class="c2p-project-list">
-            <div style="padding: 16px; text-align: center; color: #777; font-size: 12px;">正在读取项目列表...</div>
+            <div style="padding: 16px; text-align: center; color: #777; font-size: 12px;">正在从后台服务读取真实项目列表...</div>
           </div>
         </div>
 
-        <!-- 视图 2：自定义输入路径 -->
         <div id="c2p-view-custom" style="display: none;">
           <div class="c2p-input-row">
             <input type="text" id="c2p-custom-path" class="c2p-input" placeholder="输入或浏览本地项目绝对路径" />
@@ -406,7 +431,7 @@
         <div class="c2p-checkbox-group">
           <label class="c2p-checkbox-label">
             <input type="checkbox" id="c2p-opt-bind" checked />
-            同步更新会话数据库绑定（在左侧栏上方直接归入该项目折叠树）
+            同步修改会话底层双库绑定（在左侧栏上方直接归入该项目折叠树）
           </label>
           <label class="c2p-checkbox-label">
             <input type="checkbox" id="c2p-opt-context" checked />
@@ -437,11 +462,9 @@
     const cancelBtn = overlay.querySelector('#c2p-cancel-btn');
     const submitBtn = overlay.querySelector('#c2p-submit-btn');
 
-    let currentMode = 'existing'; // 'existing' | 'custom'
+    let currentMode = 'existing';
     let selectedProject = null;
-    let projectsList = [];
 
-    // Tab 切换逻辑
     tabExisting.onclick = () => {
       currentMode = 'existing';
       tabExisting.classList.add('active');
@@ -459,7 +482,6 @@
       customPathInput.focus();
     };
 
-    // 动态渲染项目列表卡片
     function renderProjectCards(list) {
       cardsContainer.innerHTML = '';
       if (!list || list.length === 0) {
@@ -490,9 +512,7 @@
       selectedProject = list[0];
     }
 
-    // 异步加载数据
     fetchProjectsList().then(list => {
-      projectsList = list;
       renderProjectCards(list);
     });
 
@@ -519,6 +539,8 @@
     submitBtn.onclick = async () => {
       let targetPath = '';
       let targetProjectId = '';
+      let targetUri = '';
+      let projectName = '';
 
       if (currentMode === 'existing') {
         if (!selectedProject) {
@@ -527,13 +549,16 @@
         }
         targetPath = selectedProject.path;
         targetProjectId = selectedProject.id;
+        targetUri = selectedProject.uri || '';
+        projectName = selectedProject.name;
       } else {
         targetPath = customPathInput.value.trim();
         if (!targetPath) {
           alert('请输入或选择目标工程本地路径！');
           return;
         }
-        targetProjectId = 'proj_' + Math.random().toString(36).substring(2, 10);
+        targetProjectId = 'proj_' + Date.now().toString(36);
+        projectName = targetPath.split('/').pop() || targetPath;
       }
 
       const optBind = overlay.querySelector('#c2p-opt-bind').checked;
@@ -542,8 +567,10 @@
 
       overlay.remove();
       await executeMoveOperation({
+        projectName,
         targetPath,
         targetProjectId,
+        targetUri,
         optBind,
         optContext,
         optRules
@@ -551,63 +578,39 @@
     };
   }
 
-  // 执行最终迁移与重绑定
   async function executeMoveOperation(params) {
-    const { targetPath, targetProjectId, optBind, optContext, optRules } = params;
-    const convId = getCurrentConversationId();
+    const { projectName, targetPath, targetProjectId, targetUri, optBind, optContext, optRules } = params;
+    const convId = await getCurrentConversationId();
 
-    showToast(`正在将会话导入目标项目：${targetPath}...`);
+    if (!convId) {
+      showToast('❌ 未能识别当前会话 ID，请重试', 4000);
+      return;
+    }
 
-    let bindSuccess = false;
-    // 优先调用主进程无沙箱 IPC 接口
+    showToast(`正在绑定会话至项目【${projectName}】...`);
+
     if (electron && electron.ipcRenderer) {
       try {
         const res = await electron.ipcRenderer.invoke('chat-to-project:bind-conversation', {
           convId,
           targetPath,
           targetProjectId,
+          targetUri,
           options: { optBind, optContext, optRules }
         });
+
         if (res && res.success) {
-          bindSuccess = true;
+          showSuccessDialog(projectName, res);
+          return;
         }
       } catch (err) {
-        console.warn('[Chat-to-Project] Main IPC bind-conversation failed:', err);
+        console.error('[Chat-to-Project] Main IPC bind-conversation failed:', err);
+        showToast(`❌ 绑定失败: ${err.message}`, 5000);
+        return;
       }
     }
 
-    // 向当前会话输入框填入提示，驱动智能体沉淀上下文
-    sendPromptToAgent(`请使用 chat-to-project 技能将当前聊天的完整上下文、架构决策与生成的代码沉淀到项目：${targetPath}（已完成项目重绑定）`);
-
-    showToast(`🎉 成功导入！会话已绑定至项目，请按 ⌘+Q 退出重启客户端，即可在上方项目树中查看！`, 6000);
-  }
-
-  function sendPromptToAgent(text) {
-    const textarea = document.querySelector('textarea, div[contenteditable="true"]');
-    if (!textarea) return;
-
-    if (textarea.tagName === 'TEXTAREA') {
-      try {
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-        nativeSetter.call(textarea, text);
-      } catch (e) {
-        textarea.value = text;
-      }
-      textarea.dispatchEvent(new Event('input', { bubbles: true }));
-      textarea.dispatchEvent(new Event('change', { bubbles: true }));
-    } else {
-      textarea.innerText = text;
-      textarea.dispatchEvent(new InputEvent('input', { bubbles: true }));
-    }
-
-    setTimeout(() => {
-      const sendBtn = document.querySelector('button[aria-label*="Send"], button[aria-label*="发送"], button[type="submit"]');
-      if (sendBtn) {
-        sendBtn.click();
-      } else {
-        textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-      }
-    }, 200);
+    showToast('❌ 无法连接主进程 IPC，请确保补丁已正确安装', 4000);
   }
 
   function getOrCreateButton() {
